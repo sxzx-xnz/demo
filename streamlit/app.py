@@ -7,9 +7,10 @@ import os
 from PIL import Image
 import hashlib
 import datetime
+import requests # Ditambahkan untuk download
 
 # =====================================================================================
-# 1. KONFIGURASI & SETUP
+# 1. KONFIGURASI, SETUP, DAN DOWNLOAD MODEL
 # =====================================================================================
 
 st.set_page_config(
@@ -18,10 +19,60 @@ st.set_page_config(
     layout="centered"
 )
 
-# Lokasi file & Inisialisasi folder
+# --- FUNGSI DOWNLOAD MODEL (Dijalankan Pertama Kali) ---
+def download_file_from_gdrive(file_id, destination):
+    """Fungsi untuk mengunduh file dari Google Drive dengan progress bar."""
+    URL = "https://docs.google.com/uc?export=download"
+    
+    # Keluar jika file sudah ada, tidak perlu download ulang
+    if os.path.exists(destination):
+        return
+
+    # Tampilkan pesan unduhan hanya jika file belum ada
+    st.info(f"Mengunduh model {os.path.basename(destination)}... Ini mungkin butuh beberapa saat.")
+    session = requests.Session()
+    
+    try:
+        response = session.get(URL, params={'id': file_id}, stream=True)
+        response.raise_for_status() # Cek jika ada error HTTP
+
+        total_size_in_bytes = int(response.headers.get('content-length', 0))
+        progress_bar = st.progress(0)
+        
+        with open(destination, 'wb') as f:
+            downloaded_size = 0
+            for chunk in response.iter_content(chunk_size=32768):
+                if chunk:
+                    downloaded_size += len(chunk)
+                    f.write(chunk)
+                    # Update progress bar
+                    if total_size_in_bytes > 0:
+                        progress = int((downloaded_size / total_size_in_bytes) * 100)
+                        progress_bar.progress(progress, text=f"Downloading... {progress}%")
+                    
+        progress_bar.empty()
+        st.success(f"Model {os.path.basename(destination)} berhasil diunduh!")
+        # Muat ulang aplikasi secara otomatis setelah download selesai
+        st.rerun()
+    except requests.exceptions.RequestException as e:
+        st.error(f"Gagal mengunduh model. Cek koneksi internet atau ID file. Error: {e}")
+
+
+# --- PANGGIL FUNGSI DOWNLOAD DI SINI ---
+# Pastikan folder ada sebelum download
+os.makedirs("models", exist_ok=True) 
+# Ekstrak ID file dari link Google Drive Anda
+# Link: https://drive.google.com/file/d/1fRrv1FCg8hd2uLyBUbhB0DpI6teixUob/view?usp=sharing
+# ID File: 1fRrv1FCg8hd2uLyBUbhB0DpI6teixUob
+TFLITE_MODEL_ID = "1fRrv1FCg8hd2uLyBUbhB0DpI6teixUob"
+TFLITE_MODEL_PATH = "models/bestmodel.tflite"
+download_file_from_gdrive(TFLITE_MODEL_ID, TFLITE_MODEL_PATH)
+
+
+# Lokasi file & Inisialisasi folder lainnya
 USER_DATA_FILE = "data/users.json"
 SCAN_HISTORY_DIR = "data/scan_history_images/"
-for folder in ["models", "data", SCAN_HISTORY_DIR]:
+for folder in ["data", SCAN_HISTORY_DIR]:
     os.makedirs(folder, exist_ok=True)
 if not os.path.exists(USER_DATA_FILE):
     with open(USER_DATA_FILE, 'w') as f:
@@ -32,7 +83,6 @@ NUTRITION_DB = {
     'apple': {'Kalori': 52, 'Karbohidrat (g)': 14, 'Protein (g)': 0.3, 'Lemak (g)': 0.2},
     'banana': {'Kalori': 89, 'Karbohidrat (g)': 23, 'Protein (g)': 1.1, 'Lemak (g)': 0.3},
     'pizza': {'Kalori': 266, 'Karbohidrat (g)': 33, 'Protein (g)': 11, 'Lemak (g)': 10},
-    # Tambahkan item makanan lain sesuai kelas model Anda
 }
 
 # =====================================================================================
@@ -52,16 +102,13 @@ def save_users(users_data):
 # =====================================================================================
 # 3. PEMUATAN MODEL
 # =====================================================================================
-
-# PENTING: Ganti daftar ini dengan nama-nama kelas dari model TFLite Anda,
-# pastikan urutannya benar sesuai saat training.
 FOOD_CLASSES = ['apple', 'banana', 'pizza'] 
 
 @st.cache_resource
 def load_tflite_model(model_path):
-    """Memuat model TensorFlow Lite (.tflite)."""
     if not os.path.exists(model_path):
-        st.error(f"Model TFLite tidak ditemukan di: {model_path}")
+        # Pesan ini seharusnya tidak muncul lagi, tapi sebagai pengaman
+        st.error(f"Menunggu model TFLite di: {model_path}. Jika unduhan macet, coba refresh halaman.")
         return None
     try:
         interpreter = tf.lite.Interpreter(model_path=model_path)
@@ -73,7 +120,6 @@ def load_tflite_model(model_path):
 
 @st.cache_resource
 def load_h5_model(model_path):
-    """Memuat model Keras (.h5)."""
     if not os.path.exists(model_path):
         st.error(f"Model H5 tidak ditemukan di: {model_path}")
         return None
@@ -111,7 +157,7 @@ def food_classification_page():
     image_file = st.file_uploader("Pilih file gambar...", type=['jpg', 'jpeg', 'png'])
 
     if image_file is not None:
-        interpreter = load_tflite_model('models/bestmodel.tflite')
+        interpreter = load_tflite_model(TFLITE_MODEL_PATH)
         if interpreter is None:
             return
 
@@ -123,26 +169,21 @@ def food_classification_page():
 
         with col2:
             with st.spinner("Mengklasifikasi gambar..."):
-                # Dapatkan detail input dari model TFLite
                 input_details = interpreter.get_input_details()
                 input_shape = input_details[0]['shape']
                 height, width = input_shape[1], input_shape[2]
-
-                # Pre-processing gambar
+                
                 img_resized = image.resize((width, height))
                 img_array = np.array(img_resized, dtype=np.float32)
                 img_array = np.expand_dims(img_array, axis=0)
-                img_array /= 255.0  # Normalisasi jika model Anda dilatih dengan cara ini
+                img_array /= 255.0
 
-                # Lakukan prediksi
                 interpreter.set_tensor(input_details[0]['index'], img_array)
                 interpreter.invoke()
 
-                # Dapatkan hasil
                 output_details = interpreter.get_output_details()
                 output_data = interpreter.get_tensor(output_details[0]['index'])
                 
-                # Proses hasil
                 predicted_index = np.argmax(output_data)
                 confidence = np.max(output_data)
                 predicted_class_name = FOOD_CLASSES[predicted_index]
@@ -151,7 +192,6 @@ def food_classification_page():
                 st.success(f"**Prediksi:** {predicted_class_name.capitalize()}")
                 st.info(f"**Tingkat Keyakinan:** {confidence:.2%}")
 
-                # Tampilkan info gizi
                 nutrition_info = NUTRITION_DB.get(predicted_class_name.lower())
                 if nutrition_info:
                     st.subheader("Estimasi Kandungan Gizi")
@@ -160,7 +200,6 @@ def food_classification_page():
                     st.warning("Informasi gizi untuk makanan ini tidak tersedia.")
 
 def disease_prediction_page():
-    # Fungsi ini tetap sama seperti sebelumnya
     st.title("🔬 Prediksi Risiko Penyakit Kronis")
     st.write("Prediksi dibuat berdasarkan data kesehatan di profil Anda.")
     user_data = load_users()[st.session_state['email']]
@@ -170,6 +209,7 @@ def disease_prediction_page():
         return
     st.info("Data kesehatan yang digunakan:"); st.json(health_data)
     if st.button("Jalankan Prediksi Risiko", type="primary"):
+        # Anda mungkin perlu menyediakan model ini juga melalui download jika besar
         model = load_h5_model('models/disease-prediction-tf-model.h5')
         if model is None: return
         height = health_data['Tinggi Badan (cm)']; weight = health_data['Berat Badan (kg)']
@@ -177,7 +217,8 @@ def disease_prediction_page():
         age = health_data['Usia']; bp = health_data['Tekanan Darah Sistolik (mmHg)']
         chol = health_data['Kolesterol Total (mg/dL)']; glucose = health_data['Gula Darah Puasa (mg/dL)']
         bmi = weight / ((height / 100) ** 2)
-        features = np.array([[height, weight, gender_binary, age, bp, chol, glucose, bmi, 0,0,0,0,0,0,0]]) # Sesuaikan fitur jika perlu
+        # Pastikan jumlah fitur sesuai dengan yang diharapkan model Anda
+        features = np.array([[height, weight, gender_binary, age, bp, chol, glucose, bmi, 0,0,0,0,0,0,0]])
         predictions = model.predict(features)
         st.subheader("Potensi Risiko Penyakit:")
         diseases = ['Anemia', 'Kolesterol Tinggi', 'Gagal Ginjal Kronis', 'Diabetes', 'Penyakit Jantung', 'Hipertensi', 'Sindrom Metabolik', 'Perlemakan Hati', 'Obesitas', 'Stroke']
@@ -187,7 +228,6 @@ def disease_prediction_page():
         else: st.success("✅ Tidak ada risiko penyakit kronis yang signifikan terdeteksi.")
 
 def settings_page():
-    # Fungsi ini tetap sama seperti sebelumnya
     st.title("⚙️ Pengaturan Profil dan Kesehatan")
     users = load_users(); user_data = users[st.session_state['email']]
     with st.form("settings_form"):
@@ -210,7 +250,6 @@ def settings_page():
             save_users(users); st.success("Data berhasil diperbarui!")
 
 def initial_health_data_entry():
-    # Fungsi ini tetap sama seperti sebelumnya
     st.title("Satu Langkah Lagi!"); st.header("Masukkan Data Kesehatan Awal Anda")
     with st.form("initial_health_form"):
         h_col1, h_col2 = st.columns(2)
@@ -224,7 +263,6 @@ def initial_health_data_entry():
             save_users(users); st.rerun()
 
 def auth_page():
-    # Fungsi ini tetap sama seperti sebelumnya
     st.title("Selamat Datang di Nutrisense 🥗")
     login_tab, register_tab = st.tabs(["Login", "Register"])
     with login_tab:
